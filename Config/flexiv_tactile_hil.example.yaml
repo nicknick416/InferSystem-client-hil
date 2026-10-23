@@ -1,0 +1,257 @@
+# Sanitized example: configure hardware, calibration, endpoints and task limits before --live.
+
+robot:
+  type: flexiv
+  name: flexiv_arm
+  serial_number: "REPLACE_WITH_DEVICE_SERIAL"
+  network_interface_whitelist: ["127.0.0.1"]
+  verbose: true
+  lite: false
+
+  gripper:
+    name: "Flexiv-GN01"
+    max_width: 0.10
+    min_width: 0.0
+    max_velocity: 0.2
+    max_force: 80.0
+    default_velocity: 0.2
+    default_force: 15.0
+
+  control:
+    default_mode: NRT_CARTESIAN_MOTION_FORCE
+    frequency_hz: 1000.0
+    home_position_deg: [0, -20, 0, 90, 0, 20, 0]
+    home_velocity_scale: 30
+
+
+
+
+
+
+
+
+
+cameras:
+  third_view:
+    type: realsense
+    serial_number: "REPLACE_WITH_DEVICE_SERIAL"
+    mapped_key: observation/image
+    enable_depth: false
+    streams:
+      color: {width: 640, height: 480, fps: 30, encoding: bgr8}
+    params:
+      exposure.auto: true
+
+  left_wrist_view:
+    type: realsense
+    serial_number: "REPLACE_WITH_DEVICE_SERIAL"
+    mapped_key: observation/wrist_image
+    enable_depth: false
+    streams:
+      color: {width: 640, height: 480, fps: 30, encoding: bgr8}
+    params:
+      exposure.auto: true
+
+  second_third_view:
+    type: realsense
+    serial_number: "REPLACE_WITH_DEVICE_SERIAL"
+    mapped_key: observation/second_third_image
+    enable_depth: false
+    streams:
+      color: {width: 640, height: 480, fps: 30, encoding: bgr8}
+    params:
+      exposure.auto: true
+
+tactile:
+  left_wrist_left_tactile:
+    type: opencv
+    device_path: "/dev/video0"
+    mapped_key: observation/left_tactile
+    width: 640
+    height: 360
+    fps: 30
+
+  left_wrist_right_tactile:
+    type: opencv
+    device_path: "/dev/video0"
+    mapped_key: observation/right_tactile
+    width: 640
+    height: 360
+    fps: 30
+
+inference:
+
+  rtc:
+    enabled: true
+    prefix_length: 4
+
+  server: "127.0.0.1:5556"
+  recv_timeout_ms: 30000
+  fps: 30
+  jpeg_quality: 90
+  n_execute: 30
+  enabled_cameras: [third_view, left_wrist_view, left_wrist_left_tactile, left_wrist_right_tactile]
+  action_space: cartesian
+
+
+
+  policy_format: canonical
+  canonical_dim: 32
+
+
+
+
+
+  arm_dim: 7
+  gripper_index: 7
+
+  gripper_mode: width
+  gripper_threshold: 0.5
+
+  gripper_action_is_10x_meters: true
+
+  hold_gripper_closed_during_inference: false
+
+  open_gripper_on_inference_end: true
+
+
+
+
+  inference_home: [0.0, -0.349066, 0.0, 1.570796, 0.0, 0.349066, 0.0]
+
+  inference_home_gripper_width: 0.1
+
+  latency_compensation: true
+  smooth:
+    enabled: true
+    overlap_steps: 8
+  async:
+    enabled: true
+    obs_fps: 30
+    max_latency_steps: 8
+
+
+  max_eef_delta_m: 0.15
+  max_eef_rotation_delta_rad: 0.8
+  max_joint_delta_rad: 10
+  max_joint_velocity_rad_s: 1.2
+
+
+hil:
+  expo_online: false
+  expo_replan_steps: 8
+  output_dir: "hil_data"
+  horizon: 50
+  vendor_id: 9583
+  product_id: null
+  deadzone: 0.1
+  linear_speed_m_s: 0.06
+  angular_speed_rad_s: 0.21
+  gripper_speed_m_s: 0.03
+  max_observation_age_s: 0.25
+  home_velocity_scale: 0.60
+
+  tactile_history_frames: 1
+  server_capture: false
+
+  rotation_roll_enabled: false
+  rotation_pitch_enabled: false
+  rotation_yaw_enabled: false
+
+
+
+
+
+
+
+
+
+
+
+
+  tactile_stuck_detection:
+    method: local_normal
+    slip_enabled: true
+    slip_speed_px_s: 8.0
+    slip_min_coherence: 0.65
+    slip_min_tracks: 6
+    slip_confirm_frames: 3
+    slip_min_energy: 0.15
+    slip_min_contact_ratio: 0.85
+    slip_arm_s: 0.3
+    normal_data_dir: "tactile_normal_data"
+    normal_min_samples: 10
+    normal_min_blocks: 4
+    normal_server: http://127.0.0.1:5558
+    normal_token_file: "Config/local/correction.token"
+    normal_corrector_data_dir: "/path/to/corrector/data"
+    energy_margin: 0.25
+    energy_confirm_frames: 5
+    energy_min_hold_score: 1.0
+    opening_delta_m: 0.002
+    enabled: true
+    image_key: observation/left_tactile
+    calibration_start_s: 0.5
+    calibration_end_s: 1.5
+    arm_after_s: 2.0
+    threshold_floor: 0.75
+    increase_threshold: 0.5
+    max_sample_gap_s: 0.2
+
+  stuck_detection:
+    window_mode: feedback
+    feedback_samples: 5
+    feedback_max_excursion_m: 0.00018
+    confirm_chunks: 1
+    min_error_fraction: 0.8
+    log_interval_s: 2.0
+    enabled: true
+    min_tracking_error_m: 0.0015
+    release_tracking_error_m: 0.0005
+    max_position_excursion_m: 0.0006
+    command_timeout_s: 1.0
+    max_sample_gap_s: 0.2
+    min_samples: 5
+    min_direction_cosine: 0.7
+
+
+
+  manual_recovery_enabled: true
+  stuck_recovery:
+    enabled: true
+    target_mode: before_last_moving_chunk
+    motion_mode: inference
+    history_s: 5.0
+    min_motion_m: 0.001
+    max_distance_m: 0.02
+    max_rotation_rad: 0.15
+    linear_speed_m_s: 0.005
+    angular_speed_rad_s: 0.1
+    max_tracking_error_m: 0.002
+    max_tracking_rotation_rad: 0.03
+    position_tolerance_m: 0.001
+    arrival_confirm_samples: 5
+    rotation_tolerance_rad: 0.01
+    timeout_s: 8.0
+    max_sample_gap_s: 0.2
+
+
+
+  correction:
+    action_mode: xyz
+    enabled: false
+    auto_execute: false
+    server: http://127.0.0.1:5558
+    token_file: "Config/local/correction.token"
+    data_dir: "correction_data"
+    wrist_key: observation/wrist_image
+    max_translation_m: 0.02
+    max_rotation_rad: 0.15
+    request_timeout_s: 3.0
+    max_anchor_drift_m: 0.001
+    max_anchor_rotation_rad: 0.01
+    max_auto_per_episode: 1
+    motion_mode: limited
+    linear_speed_m_s: 0.005
+    angular_speed_rad_s: 0.1
+    resume_delay_s: 0.1

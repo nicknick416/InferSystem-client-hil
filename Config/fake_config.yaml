@@ -1,0 +1,164 @@
+# Sanitized example: configure hardware, calibration, endpoints and task limits before --live.
+
+
+
+
+
+
+
+robot:
+
+
+  type: flexiv
+  name: fake_flexiv_arm
+  serial_number: "REPLACE_WITH_DEVICE_SERIAL"
+  network_interface_whitelist: []
+  verbose: true
+  lite: false
+
+  gripper:
+    name: "Fake-Flexiv-Gripper"
+    max_width: 0.10
+    min_width: 0.0
+    max_velocity: 0.2
+    max_force: 30.0
+    default_velocity: 0.1
+    default_force: 20.0
+
+  control:
+
+
+    default_mode: NRT_JOINT_POSITION
+    frequency_hz: 1000.0
+    home_position_deg: [0, -20, 0, 90, 0, 20, 0]
+    home_velocity_scale: 30
+
+
+  joint_limits:
+    position_min_deg: [-160, -130, -170, -107, -170, -80, -170]
+    position_max_deg: [160, 130, 170, 154, 170, 260, 170]
+    velocity_max: [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
+    acceleration_max: [3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0]
+    torque_max: [100, 100, 50, 50, 20, 20, 20]
+
+cameras:
+
+
+
+  third_view:
+    type: realsense
+    serial_number: "REPLACE_WITH_DEVICE_SERIAL"
+    mapped_key: "observation/image"
+    calibration_role: eye_to_hand
+    enable_depth: false
+    align_depth_to_color: true
+    streams:
+      color: {width: 640, height: 480, fps: 30, encoding: bgr8}
+    params:
+      exposure.auto: false
+      exposure.value: 4000
+      gain: 32
+      white_balance.auto: false
+      white_balance.value: 4600
+
+  wrist_view:
+    type: realsense
+    serial_number: "REPLACE_WITH_DEVICE_SERIAL"
+    mapped_key: "observation/wrist_image"
+    calibration_role: eye_in_hand
+    enable_depth: false
+    streams:
+      color: {width: 640, height: 480, fps: 30, encoding: bgr8}
+
+  secondary_view:
+    type: realsense
+    serial_number: "REPLACE_WITH_DEVICE_SERIAL"
+    mapped_key: "observation/secondary_image"
+    calibration_role: null
+    enable_depth: false
+    streams:
+      color: {width: 640, height: 480, fps: 30, encoding: bgr8}
+
+tactile:
+
+  wrist_tactile_left:
+    type: opencv
+    device_path: "/dev/video0"
+
+    mapped_key: "observation/tactile_image"
+    width: 640
+    height: 480
+    fps: 30
+
+inference:
+
+  server: "127.0.0.1:5555"
+  recv_timeout_ms: 30000
+  jpeg_quality: 90
+
+
+  fps: 30
+  n_execute: 40
+
+
+  enabled_cameras: [third_view, wrist_view, secondary_view, wrist_tactile_left]
+
+
+
+
+
+
+
+
+  action_space: joint_position
+
+
+
+
+  policy_format: normal
+  canonical_dim: 32
+
+
+
+
+  arm_dim: 7
+  gripper_index: 7
+
+
+
+  gripper_mode: binary
+  gripper_threshold: 0.5
+
+
+  inference_home: [0.0, -0.349066, 0.0, 1.570796, 0.0, 0.349066, 0.0]
+
+
+  latency_compensation: true
+
+
+
+  smooth:
+    enabled: true
+    overlap_steps: 8
+
+
+
+  async:
+    enabled: false
+    obs_fps: null
+    max_latency_steps: 8
+
+
+  max_joint_delta_rad: 0.5
+  max_eef_delta_m: 0.10
+  max_eef_rotation_delta_rad: 0.8
+  max_joint_velocity_rad_s: 1.2
+
+
+  video_codec: libx264
+  video_crf: 28
+  video_preset: veryfast
+
+logging:
+  console_level: INFO
+  file_level: DEBUG

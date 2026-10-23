@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+*.egg-info/
+
+# Runtime output and datasets
+Logs/
+logs/
+*.log
+*.jsonl
+videos/
+*.mp4
+*.avi
+*.mkv
+*.bag
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.parquet
+
+# Backups and local editor state
+*.bak
+*.bak.*
+*.bak_*
+*.orig
+*~
+.DS_Store
+.idea/
+.vscode/
+.claude/
+
+# Secrets and machine-specific configuration
+.env
+.env.*
+Config/local/
+Config/*_local.yaml
+
+# HIL runtime artifacts and local deployment
+.backups/
+backups/
+hil_data*/
+correction_data*/
+dsrl_data*/
+tactile_normal*/
+rtc_replay_reports/
+*.token
+*.pt
+*.pth
+*.safetensors
+*.msgpack
+Config/*.before*
