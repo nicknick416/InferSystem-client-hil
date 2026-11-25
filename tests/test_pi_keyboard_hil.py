@@ -119,7 +119,7 @@ def test_open_timeout_holds_and_must_be_explicitly_accepted():
 def test_keyboard_config_uses_rtc_and_no_automatic_recovery():
     cfg, raw = check_config(ROOT / 'Config/flexiv_pi_cylinder_rtc_keyboard_hil.yaml')
     assert raw['inference']['rtc'] == {'enabled': True, 'prefix_length': 4}
-    assert raw['hil']['output_dir'] == 'hil_data_pi_cylinder_keyboard_rtc'
+    assert raw['hil']['output_dir'] == 'data'
     assert not raw['hil']['keyboard_hil']['enabled']
     assert not raw['hil']['stuck_detection']['enabled']
     assert not raw['hil']['stuck_recovery']['enabled']
@@ -168,6 +168,7 @@ def test_kept_keyboard_pair_carries_hil_identity(tmp_path):
            policy_source={'request_id': 2, 'chunk_index': 0, 'observation_time': .02},
            policy_observation_age_s=.01, pair_valid=True)
     ep.add('episode_end', last_tick=1)
+    ep.metadata['outcome'] = 'success'
     path = ep.decide(True)
     with (path / 'pairs.msgpack').open('rb') as stream:
         pair = next(msgpack.Unpacker(stream, raw=False))

@@ -225,7 +225,7 @@ class ActionDispatcher:
             and 0 <= self._gripper_index < len(action_values)
         ):
             gripper_val = float(action_values[self._gripper_index])
-            if self._gripper_mode == "width":
+            if self._gripper_mode in ("width", "normalized_width"):
                 self._dispatch_gripper_width(gripper_val)
             else:
                 gripper_open = gripper_val >= self._gripper_threshold
@@ -340,12 +340,19 @@ class ActionDispatcher:
         """Move gripper to a target width in meters."""
         max_width = self._get_gripper_max_width()
         raw_width = float(width)
+        if self._gripper_mode == "normalized_width":
+            raw_width = max(0.0, min(1.0, raw_width)) * max_width
         scaled_width = (
             raw_width * self._GRIPPER_10X_METER_SCALE
             if self._gripper_action_is_10x_meters
             else raw_width
         )
         target = max(0.0, min(scaled_width, max_width))
+        if self._max_eef_gripper_step > 0:
+            reference = self._last_gripper_width_cmd
+            if reference is None:
+                reference = float(self._gripper.observe().width)
+            target = _clamp_scalar_step(reference, target, self._max_eef_gripper_step)
         if (
             self._last_gripper_width_cmd is not None
             and abs(target - self._last_gripper_width_cmd)
@@ -672,6 +679,9 @@ def _state_gripper_scalar(
     value = float(value)
     if mode == "raw":
         return value
+    if mode == "normalized_width":
+        # UR training contract: state is meters; only actions are normalized.
+        return value
     if mode == "width":
         max_width = float(max_width)
         if max_width > 0:
@@ -692,6 +702,8 @@ def _action_gripper_scalar(
     value = float(value)
     if mode == "raw":
         return value
+    if mode == "normalized_width":
+        return max(0.0, min(1.0, value)) * max_width
     max_width = float(max_width) if max_width > 0 else 0.08
     if mode == "width":
         return max(0.0, min(value, max_width))

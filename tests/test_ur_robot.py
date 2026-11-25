@@ -111,3 +111,55 @@ def test_ur_joint_and_cartesian_actions_call_rtde_interfaces():
 
     assert robot._rtde_c.servoj_calls
     assert robot._rtde_c.servol_calls
+
+def test_ur_packaged_gripper_activation_and_open_direction(monkeypatch):
+    from Robot import robotiq_gripper
+    from Robot.ur import URRobotiqGripper
+    class Fake:
+        def connect(self, *args, **kwargs): pass
+        def activate(self, **kwargs): self.activation = kwargs
+        def move(self, raw, **kwargs):
+            self.raw = raw
+            return True, raw
+    monkeypatch.setattr(robotiq_gripper, "RobotiqGripper", Fake)
+    gripper = URRobotiqGripper("192.0.2.2", config={"auto_calibrate_on_connect": False})
+    gripper.connect()
+    assert gripper._gripper.activation["auto_calibrate"] is False
+    gripper.set(True)
+    assert gripper._gripper.raw == 0
+    gripper.move(0.0)
+    assert gripper._gripper.raw == 255
+
+
+def test_ur_rejected_servo_is_not_success():
+    import pytest
+    robot = _connected_robot()
+    robot._rtde_c.servoL = lambda *args: False
+    with pytest.raises(RuntimeError, match="rejected"):
+        robot.act(Action(ActionSpace.CARTESIAN, [0.1, 0.2, 0.3, 1, 0, 0, 0]))
+
+
+def test_ur_normalized_gripper_state_and_dispatch():
+    import pytest
+    from Inference.dispatch import ActionDispatcher, _state_gripper_scalar
+    from Robot.gripper import GripperState
+    class Gripper:
+        def observe(self): return GripperState(width=0.0425, max_width=0.085)
+        def move(self, width, **kwargs): self.width = width
+    gripper = Gripper()
+    dispatcher = ActionDispatcher.__new__(ActionDispatcher)
+    dispatcher._gripper = gripper
+    dispatcher._gripper_mode = "normalized_width"
+    dispatcher._gripper_max_width = None
+    dispatcher._last_gripper_width_cmd = None
+    dispatcher._gripper_action_is_10x_meters = False
+    dispatcher._gripper_wait_during_inference = False
+    dispatcher._max_eef_gripper_step = 0.005
+    value = _state_gripper_scalar(0.0425, mode="normalized_width", threshold=0.5, max_width=0.085)
+    assert value == pytest.approx(0.0425)
+    dispatcher._dispatch_gripper_width(0.5)
+    assert gripper.width == pytest.approx(0.0425)
+    dispatcher._dispatch_gripper_width(1.0)
+    assert gripper.width == pytest.approx(0.0475)
+    dispatcher._dispatch_gripper_width(0.0)
+    assert gripper.width == pytest.approx(0.0425)

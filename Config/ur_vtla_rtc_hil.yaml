@@ -1,0 +1,187 @@
+# Sanitized UR HIL example; configure hardware and task limits before --live.
+robot:
+  type: ur
+  name: ur_loading
+  robot_ip: 192.0.2.10
+  dof: 6
+  control:
+    frequency_hz: 30
+    home_position_deg:
+    - 180
+    - -90
+    - 90
+    - -90
+    - -90
+    - 0
+    home_speed: 0.3
+    home_acceleration: 0.3
+    servoj_lookahead: 0.1
+    servoj_gain: 300
+    wait_step_reached: false
+  gripper:
+    enabled: true
+    port: 63352
+    speed: 64
+    force: 64
+    deadband: 2
+    open_raw: 0
+    close_raw: 255
+    min_width: 0.0
+    max_width: 0.085
+    invert_set_open_close: false
+    auto_calibrate: false
+    auto_calibrate_on_connect: false
+cameras:
+  third_view:
+    type: realsense
+    serial_number: REPLACE_WITH_DEVICE_SERIAL
+    mapped_key: observation/image
+    enable_depth: false
+    streams:
+      color:
+        width: 640
+        height: 480
+        fps: 30
+        encoding: bgr8
+  left_wrist_view:
+    type: realsense
+    serial_number: REPLACE_WITH_DEVICE_SERIAL
+    mapped_key: observation/wrist_image
+    enable_depth: false
+    streams:
+      color:
+        width: 640
+        height: 480
+        fps: 30
+        encoding: bgr8
+tactile:
+  left_wrist_left_tactile:
+    type: opencv
+    device_path: /dev/v4l/by-id/REPLACE_WITH_TACTILE_0
+    mapped_key: observation/left_tactile
+    width: 640
+    height: 360
+    fps: 30
+  left_wrist_right_tactile:
+    type: opencv
+    device_path: /dev/v4l/by-id/REPLACE_WITH_TACTILE_1
+    mapped_key: observation/right_tactile
+    width: 640
+    height: 360
+    fps: 30
+inference:
+  protocol: zmq
+  server: 127.0.0.1:5566
+  recv_timeout_ms: 30000
+  prompt: Place the black workpiece into the plastic tray.
+  fps: 30
+  n_execute: 50
+  latency_compensation: false
+  action_space: cartesian
+  policy_format: canonical
+  canonical_dim: 32
+  gripper_mode: normalized_width
+  gripper_wait_during_inference: false
+  enabled_cameras:
+  - third_view
+  - left_wrist_view
+  - left_wrist_left_tactile
+  - left_wrist_right_tactile
+  inference_home:
+  - 3.1415926536
+  - -1.5707963268
+  - 1.5707963268
+  - -1.5707963268
+  - -1.5707963268
+  - 0.0
+  inference_home_gripper_width: 0.0773
+  max_eef_delta_m: 0.3
+  max_eef_rotation_delta_rad: 1
+  max_eef_xyz_step: 0
+  max_eef_rot_step_deg: 0
+  max_eef_gripper_step: 0
+  async:
+    enabled: true
+    obs_fps: 10
+    max_latency_steps: 8
+  smooth:
+    enabled: true
+    blend_enabled: true
+    overlap_policy: full_remaining
+    bounded_blend_enabled: true
+    overlap_steps: 8
+    trajectory_matching:
+      mode: 'off'
+  arm_dim: 7
+  gripper_index: 7
+  gripper_action_is_10x_meters: false
+  gripper_state_is_10x_meters: false
+  open_gripper_on_inference_end: false
+  rtc:
+    enabled: true
+    prefix_length: 8
+logging:
+  console_level: INFO
+  file_level: DEBUG
+hil:
+  omit_stationary_frames: true
+  export_dagger_training: true
+  recording:
+    format: collector_h265
+    qp: 30
+    vaapi_device: /dev/dri/renderD128
+  expo_online: false
+  expo_replan_steps: 8
+  output_dir: data
+  horizon: 50
+  vendor_id: 9583
+  product_id: null
+  deadzone: 0.1
+  linear_speed_m_s: 0.06
+  angular_speed_rad_s: 0.21
+  gripper_speed_m_s: 0.03
+  max_observation_age_s: 0.25
+  home_velocity_scale: 0.3
+  tactile_history_frames: 1
+  server_capture: false
+  rotation_roll_enabled: false
+  rotation_pitch_enabled: false
+  rotation_yaw_enabled: false
+  tactile_stuck_detection:
+    enabled: false
+  stuck_detection:
+    window_mode: feedback
+    feedback_samples: 3
+    feedback_max_excursion_m: 0.00018
+    confirm_chunks: 1
+    min_error_fraction: 0.8
+    log_interval_s: 2.0
+    enabled: true
+    min_tracking_error_m: 0.001
+    release_tracking_error_m: 0.0005
+    max_position_excursion_m: 0.0006
+    command_timeout_s: 1.0
+    max_sample_gap_s: 0.2
+    min_samples: 5
+    min_direction_cosine: 0.7
+  manual_recovery_enabled: true
+  stuck_recovery:
+    enabled: false
+    target_mode: before_last_moving_chunk
+    motion_mode: inference
+    history_s: 5.0
+    min_motion_m: 0.001
+    max_distance_m: 0.02
+    max_rotation_rad: 0.15
+    linear_speed_m_s: 0.005
+    angular_speed_rad_s: 0.1
+    max_tracking_error_m: 0.002
+    max_tracking_rotation_rad: 0.03
+    position_tolerance_m: 0.001
+    arrival_confirm_samples: 5
+    rotation_tolerance_rad: 0.01
+    timeout_s: 8.0
+    max_sample_gap_s: 0.2
+  correction:
+    enabled: false
+    auto_execute: false

@@ -1,10 +1,9 @@
-"""Flexiv HIL runtime. Only run_live opens hardware; main defaults to check-only."""
+"""Single-arm Flexiv/UR HIL runtime. Only run_live opens hardware; main defaults to check-only."""
 from __future__ import annotations
 
 import argparse
 from dataclasses import asdict
 import hashlib
-import importlib.util
 import logging
 import os
 from pathlib import Path
@@ -18,6 +17,7 @@ import numpy as np
 import yaml
 
 from Core import load_config
+from HIL.robot_support import validate_robot, gripper_action_scale, live_dependencies
 from Inference.action_processing import canonicalize_action_values, format_policy_state_vector, max_eef_action_delta
 from Inference.dispatch import ActionDispatcher, build_policy_state_vector, quaternion_to_rotation6d
 from HIL.control import Arbiter, PolicyWorker
@@ -28,7 +28,7 @@ from HIL.stuck_recovery import StuckRecovery
 from HIL.keyboard_hil import KeyboardHIL
 from HIL.correction import CorrectionBridge, config as correction_config
 from HIL.policy_motion import PolicyMotionLimiter
-from HIL.recording import Episode, atomic_json
+from HIL.recording import Episode, RecordingSession, atomic_json
 from HIL.spacemouse import SpaceMouse, HumanController, human_action
 
 log = logging.getLogger('hil')
@@ -69,13 +69,29 @@ def check_config(path):
     raw = yaml.safe_load(Path(path).read_text())
     inf = cfg.inference
     rtc_config(raw)
-    if cfg.robot.type != 'flexiv' or inf.action_space.value != 'cartesian':
-        raise ValueError('HIL currently supports single-arm Flexiv Cartesian only')
+    validate_robot(cfg, raw)
     if inf.policy_format.value != 'canonical' or inf.canonical_dim != 32:
         raise ValueError('Expected canonical 32D policy')
-    if inf.gripper_mode.value != 'width' or inf.hold_gripper_closed_during_inference:
-        raise ValueError('HIL requires width gripper control without forced gripper hold')
     hil = raw.get('hil', {})
+    from HIL.human_idle_recording import enabled as idle_filter_enabled
+    from HIL.stationary_recording import enabled as all_idle_enabled
+    idle_enabled = all_idle_enabled(hil) or idle_filter_enabled(hil)
+    for key in ('trim_terminal_policy_hold', 'export_dagger_training'):
+        if type(hil.get(key, False)) is not bool or (hil.get(key) and not idle_enabled):
+            raise ValueError(f'{key} requires local filtered H.265 collection and a boolean switch')
+    if hil.get('trim_terminal_policy_hold'):
+        from HIL import dagger_storage  # validate optional dependencies before hardware access
+    if hil.get('export_dagger_training'):
+        from HIL import dagger_export
+    storage = hil.get('recording', {})
+    if storage:
+        from HIL.video_storage import settings
+        settings(storage)
+
+    human_control = HumanController.from_config(hil)
+    if (human_control.translation_mode == 'integrated'
+            and human_control.max_translation_lead_m > inf.max_eef_delta_m):
+        raise ValueError('hil.max_translation_lead_m must not exceed inference.max_eef_delta_m')
     for name in ('linear_speed_m_s', 'angular_speed_rad_s', 'gripper_speed_m_s', 'max_observation_age_s'):
         if not np.isfinite(hil.get(name, 0)) or hil.get(name, 0) <= 0:
             raise ValueError(f'Invalid hil.{name}')
@@ -92,7 +108,7 @@ def check_config(path):
         raise ValueError('Expected positive fps/n_execute and horizon=50')
     if len(raw.get('tactile', {})) != 2:
         raise ValueError('Expected two tactile sensors')
-    PolicyMotionLimiter(hil.get("policy_motion_limits",{}),inf.fps,10.)
+    PolicyMotionLimiter(hil.get("policy_motion_limits",{}),inf.fps,gripper_action_scale(cfg))
     detector = CombinedStuckDetector(hil.get("stuck_detection", {}), hil.get("tactile_stuck_detection", {}))
     recovery = StuckRecovery(hil.get("stuck_recovery", {}), inf.fps)
     if recovery.enabled and not detector.enabled:
@@ -120,11 +136,17 @@ def run_live(config_path, cfg, raw, prompt):
     from Sensor.tactile.ring_buffer import TactileRingBuffer
     from HIL.observations import CameraWorker
     hil, inf = raw['hil'], cfg.inference
+    if hil.get('recording', {}).get('format') == 'collector_h265':
+        from HIL.video_storage import probe
+        probe(hil['recording'])  # Fail before opening any robot/camera/HID device.
+
     rtc_enabled, rtc_prefix_length = rtc_config(raw)
     keyed_enabled = bool(hil.get('keyboard_hil', {}).get('enabled', False))
-    output = Path(hil.get('output_dir', 'hil_data'))
+    output = Path(hil.get('output_dir', 'data'))
     if not output.is_absolute():
         output = ROOT/output
+    capture_session = RecordingSession(output)
+    log.info('本次采集目录：%s', capture_session.path)
     mouse = SpaceMouse(hil.get('deadzone', .1), hil.get('vendor_id', 0x256F), hil.get('product_id'),
                        hil.get('rotation_roll_enabled', True), hil.get('rotation_pitch_enabled', True),
                        hil.get('rotation_yaw_enabled', True))
@@ -135,7 +157,10 @@ def run_live(config_path, cfg, raw, prompt):
                   rtc_enabled=rtc_enabled)
     log.info('HIL RTC enabled=%s prefix_length=%d; smoothing=%s',
              rtc_enabled, rtc_prefix_length, 'full_remaining' if rtc_enabled and arb.smooth_steps else arb.smooth_steps)
-    human_controller = HumanController()
+    human_controller = HumanController.from_config(hil)
+    log.info('HIL SpaceMouse translation=%s linear_speed=%.3f m/s lead_limit=%.3f m',
+             human_controller.translation_mode, hil['linear_speed_m_s'],
+             human_controller.max_translation_lead_m)
     old_signals = {}
 
     def interrupt(signum, frame):
@@ -184,14 +209,14 @@ def run_live(config_path, cfg, raw, prompt):
             raise RuntimeError('Robot not operational')
         gripper = robot.create_gripper()
         if gripper is None:
-            raise RuntimeError('Flexiv gripper required')
+            raise RuntimeError('Width-controlled gripper required')
         gripper.connect()
         dispatcher = ActionDispatcher.from_config(robot, gripper, cfg)
         worker = PolicyWorker(inf.server, inf.recv_timeout_ms)
         ccfg = correction_config(hil.get("correction", {}))
         if ccfg["enabled"]:
             correction = CorrectionBridge(ccfg, ROOT)
-        scale = 10. if inf.gripper_action_is_10x_meters else 1.
+        scale = gripper_action_scale(cfg)
         metadata = dict(config=raw, config_sha256=hashlib.sha256(Path(config_path).read_bytes()).hexdigest(),
                         prompt=prompt, fps=inf.fps, horizon=hil['horizon'],
                         state_layout='xyz_m,rot6d_columns,gripper_m,zero_pad_to_32',
@@ -213,7 +238,7 @@ def run_live(config_path, cfg, raw, prompt):
                 for ring in rings:
                     if not ring.wait_for_frames(1):
                         raise RuntimeError('No tactile frame after reset')
-                episode = Episode(output, metadata)
+                episode = Episode(capture_session.path, dict(metadata, **capture_session.next_metadata()))
                 if hil.get('server_capture', False):
                     session = worker.begin_episode(episode.episode_id, metadata)
                     atomic_json(episode.path/'server_transaction.json', dict(session,server=inf.server,sync_status='pending'))
@@ -327,7 +352,7 @@ def run_live(config_path, cfg, raw, prompt):
                     arm = robot.observe()
                     grip = gripper.observe()
                     if len(arm.eef_pose) != 7:
-                        raise RuntimeError('Expected a single 7D Flexiv TCP pose')
+                        raise RuntimeError('Expected a single 7D TCP pose')
                     state = format_policy_state_vector(build_policy_state_vector(
                         arm, action_space='cartesian', gripper_width=grip.width,
                         gripper_max_width=grip.max_width, gripper_mode='width'),
@@ -716,21 +741,30 @@ def run_live(config_path, cfg, raw, prompt):
                 phase=time.monotonic()
                 episode.seal()
                 log.info('[HIL结束] 记录落盘完成：%.2fs',time.monotonic()-phase)
+                if 'omitted_stationary_frames' in episode.metadata:
+                    log.info('HIL 录制：执行 %d 帧，保存 %d 帧，去除人控静止 %d 帧、策略静止 %d 帧',
+                             episode.metadata['source_tick_count'], episode.metadata['total_frames'],
+                             episode.metadata['omitted_human_idle_frames'], episode.metadata['omitted_policy_idle_frames'])
+                elif 'omitted_human_idle_frames' in episode.metadata:
+                    log.info('HIL 录制：执行 %d 帧，保存 %d 帧，省略人控静止 %d 帧',
+                             episode.metadata['source_tick_count'], episode.metadata['total_frames'],
+                             episode.metadata['omitted_human_idle_frames'])
                 from HIL.outcome import choose_episode_decision
                 choice = choose_episode_decision(episode, keyboard)
-                if choice is None:
-                    break
                 phase=time.monotonic()
-                path = episode.decide(choice)
-                log.info('[HIL结束] 本地整理完成：%.2fs',time.monotonic()-phase)
-                phase=time.monotonic()
+                keep = bool(choice)
                 if hil.get('server_capture', False):
                     from HIL.server_recording import sync_decision
-                    result = sync_decision(path, worker)
-                    log.info('[HIL结束] server提交完成：%.2fs %s',time.monotonic()-phase,result)
-                log.info('数据决定完成：%s', path)
+                    path = episode.decide(keep, sync=lambda path: sync_decision(path, worker))
+                else:
+                    path = episode.decide(keep)
+                log.info('[HIL结束] 数据整理完成：%.2fs',time.monotonic()-phase)
+                if keep:
+                    log.info('数据已保存（%s）：%s', episode.metadata.get('outcome'), path)
+                else:
+                    log.info('本轮数据已删除：%s', path.name)
                 episode = None
-                if not reset_requested:
+                if choice is None or not reset_requested:
                     break
     finally:
         # Stop first, then flush/close. No home or gripper-open side effects on exit.
@@ -760,9 +794,9 @@ def run_live(config_path, cfg, raw, prompt):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Flexiv SpaceMouse HIL; default check-only, no hardware/network access')
+    parser = argparse.ArgumentParser(description='Flexiv/UR SpaceMouse HIL; default check-only, no hardware/network access')
     parser.add_argument('config', nargs='?', default=str(ROOT/'Config/flexiv_vtla_hil.yaml'))
-    parser.add_argument('--prompt', default='Pick up the cylinder block and place it into the corresponding slot.')
+    parser.add_argument('--prompt', default=None, help='Override inference.prompt from the YAML')
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--live', action='store_true', help='Open robot/cameras/HID; Enter explicitly starts homing/inference')
     mode.add_argument('--check-only', action='store_true', help='Validate configuration/import availability only (default)')
@@ -770,10 +804,11 @@ def main():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
     cfg, raw = check_config(args.config)
     if not args.live:
-        deps = {m: importlib.util.find_spec(m) is not None for m in ('hid', 'numpy', 'zmq', 'cv2', 'flexivrdk', 'pyrealsense2')}
+        deps = live_dependencies(cfg)
         print('CHECK ONLY: no robot/HID/camera/server connection. Dependencies:', deps)
         print('Config valid:', args.config, '\nServer:', cfg.inference.server)
         if not all(deps.values()):
             raise SystemExit('Missing live dependency; install the required robot, camera and HID dependencies')
         return
-    run_live(args.config, cfg, raw, args.prompt)
+    run_live(args.config, cfg, raw, args.prompt or raw.get('inference', {}).get('prompt') or
+             'Pick up the cylinder block and place it into the corresponding slot.')

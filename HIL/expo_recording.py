@@ -1,6 +1,6 @@
 """Upload real per-tick observations at fixed-C replay boundaries after robot stop."""
 from pathlib import Path
-from HIL.recording import compact_records, records
+from HIL.recording import compact_records, records, decode_observation
 from HIL.blobs import decode
 
 
@@ -23,7 +23,7 @@ def upload_observations(path, worker, identity, manifest):
         if row['kind'] != 'tick' or int(row['tick']) not in wanted:
             continue
         tick = int(row['tick'])
-        observation = decode(row['observation'], path / 'blobs')
+        observation = decode_observation(row['observation'], path)
         worker.control(dict(cmd='expo_observe_upload', **identity, tick=tick, observation=observation))
         wanted.remove(tick)
     if wanted:

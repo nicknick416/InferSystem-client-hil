@@ -55,3 +55,9 @@ rtc_replay_reports/
 *.safetensors
 *.msgpack
 Config/*.before*
+
+# Timestamped capture sessions
+/data/
+
+# Local storage validation captures
+/validation/

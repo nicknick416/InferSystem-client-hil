@@ -9,9 +9,19 @@ from Core import ArmState
 from HIL import runtime
 
 
+@pytest.mark.parametrize('robot_type', ['flexiv', 'ur'])
 @pytest.mark.parametrize('takeover, enabled', [(False, True), (True, True), (False, False)])
-def test_live_loop_recovery_with_fake_hardware(monkeypatch, tmp_path, takeover, enabled):
+def test_live_loop_recovery_with_fake_hardware(monkeypatch, tmp_path, takeover, enabled, robot_type):
     cfg, raw = runtime.check_config(Path(runtime.ROOT)/'Config/flexiv_vtla_expo_hil.yaml')
+    if robot_type == 'ur':
+        import yaml
+        from Core.config_schema import SystemConfig
+        ur = yaml.safe_load((Path(runtime.ROOT)/'Config/ur_vtla_nonrtc_hil.yaml').read_text())
+        raw['robot'] = ur['robot']
+        raw['inference'].update(ur['inference'])
+        cfg = SystemConfig.model_validate(raw)
+    grip_max = .085 if robot_type == 'ur' else .1
+    grip_action = .04/grip_max if robot_type == 'ur' else .4
     raw['hil']['output_dir'] = str(tmp_path)
     raw['hil']['server_capture'] = False
     raw['hil']['correction'] = {'enabled': False}
@@ -51,10 +61,12 @@ def test_live_loop_recovery_with_fake_hardware(monkeypatch, tmp_path, takeover, 
     class Grip:
         def connect(self):pass
         def disconnect(self):pass
-        def observe(self):return types.SimpleNamespace(width=.04,max_width=.1)
-        def move(self,*a,**kw):pass
+        def observe(self):return types.SimpleNamespace(width=.04,max_width=grip_max)
+        def move(self, width, **kw):
+            expected = cfg.inference.inference_home_gripper_width if kw.get('wait') else .04
+            assert width == pytest.approx(expected)
     class Robot:
-        dof=7
+        dof=6 if robot_type == 'ur' else 7
         def __init__(self):self.x=.4
         @staticmethod
         def from_config(path):return robot
@@ -107,7 +119,7 @@ def test_live_loop_recovery_with_fake_hardware(monkeypatch, tmp_path, takeover, 
         def poll(self):
             if self.pending is None:return None
             context=self.pending;self.pending=None
-            action=[.42,0,.3,1,0,0,0,1,0,.4]+[0.]*22
+            action=[.42,0,.3,1,0,0,0,1,0,grip_action]+[0.]*22
             return dict(context,response_time=clock[0],response={'actions':[action]*50})
         def drain(self):return self.poll()
         def close(self):pass
@@ -133,7 +145,7 @@ def test_live_loop_recovery_with_fake_hardware(monkeypatch, tmp_path, takeover, 
         if r['mode'] in ('recovery','recovery_hold'):
             assert r['request_id'] is None and r['policy_action'] is None
             assert not r['pair_valid']
-            assert r['published_action'][9] == pytest.approx(.4)
+            assert r['published_action'][9] == pytest.approx(grip_action)
     if takeover:
         assert events[-1]['event']=='cancelled' and ts[-1]['mode']=='human'
     else:

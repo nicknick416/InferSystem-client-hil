@@ -128,7 +128,8 @@ def test_recording_execution_pairs_variable_chunk_lengths_and_decisions(tmp_path
         ep.add('tick', **execution_tick(i, request=2, index=i-3))
     ep.add('tick', **execution_tick(5, request=None))
     ep.seal()
-    assert ep.path.name.startswith('pending_')
+    assert ep.path.name.startswith('.pending_')
+    ep.metadata['outcome'] = 'success'
     path = ep.decide(True)
     with (path/'pairs.msgpack').open('rb') as f:
         pairs=list(msgpack.Unpacker(f,raw=False))
@@ -145,7 +146,7 @@ def test_recording_execution_pairs_variable_chunk_lengths_and_decisions(tmp_path
     discarded=Episode(tmp_path,{})
     discarded.add('event',reason='test')
     discarded_path=discarded.decide(False)
-    assert not (discarded_path/'records.msgpack').exists()
+    assert not discarded_path.exists()
     assert (path/'records.msgpack').exists()
 
 
@@ -155,7 +156,8 @@ def test_invalid_policy_and_timing_gaps_are_explicit(tmp_path):
     row=execution_tick(1, valid=False)
     row['publish_start']=2.
     ep.add('tick',**row)
-    path=ep.decide(True)
+    ep.metadata['outcome'] = 'success'
+    path = ep.decide(True)
     with (path/'pairs.msgpack').open('rb') as f:
         assert len(list(msgpack.Unpacker(f,raw=False)))==1
     with (path/'execution_segments.msgpack').open('rb') as f:
@@ -288,7 +290,7 @@ def test_full_mock_runtime_takeover_reset_then_keep(monkeypatch, tmp_path, serve
         def close(self): pass
     monkeypatch.setattr(rt, 'PolicyWorker', W)
     class K:
-        def __init__(self): self.answers=iter(['\n','\n','y','q']); self.i=0
+        def __init__(self): self.answers=iter(['\n','\n','s','q']); self.i=0
         def __enter__(self): return self
         def __exit__(self, *args): pass
         def wait(self, choices, message):
@@ -307,7 +309,7 @@ def test_full_mock_runtime_takeover_reset_then_keep(monkeypatch, tmp_path, serve
     raw['hil']['output_dir']=str(tmp_path)
     raw['hil']['server_capture']=server_capture
     rt.run_live(path,cfg,raw,'test')
-    kept=list(tmp_path.glob('kept_*'))
+    kept=list(tmp_path.glob('[0-9]*/[0-9]*_episode_*'))
     assert len(kept)==1
     rows=list(records(kept[0]))
     human=[r for r in rows if r['kind']=='tick' and r['mode']=='human']
@@ -329,11 +331,11 @@ def test_full_mock_runtime_takeover_reset_then_keep(monkeypatch, tmp_path, serve
                if isinstance(e, tuple) and e[0] == 'act')
     home_indices=[i for i,e in enumerate(events) if e=='home']
     assert len(home_indices)==2
-    assert home_indices[-1]<events.index('drain')<events.index(('answer','y'))
+    assert home_indices[-1]<events.index('drain')<events.index(('answer','s'))
     assert ('home_velocity', raw['hil'].get('home_velocity_scale', .30)) in events
     if server_capture:
         assert events.index('server_end') > home_indices[-1]
-        assert events.index('hil_upload') > events.index(('answer','y'))
+        assert events.index('hil_upload') > events.index(('answer','s'))
         assert events.index('hil_decide') > events.index('hil_upload')
     end=[r for r in rows if r['kind']=='episode_end']
     assert len(end)==1 and end[0]['reason']=='r' and end[0]['homing_recorded'] is False
@@ -428,7 +430,8 @@ def test_server_commit_uploads_only_after_keep_and_pending_refused(tmp_path):
     with pytest.raises(ValueError): sync_decision(ep.path,w)
     assert not w.calls
     ep.add('tick',**execution_tick(0))
-    path=ep.decide(True)
+    ep.metadata['outcome'] = 'success'
+    path = ep.decide(True)
     sync_decision(path,w)
     assert [p['cmd'] for p in w.calls]==['hil_end','hil_upload','hil_decide']
     assert w.calls[-1]['keep'] and w.calls[-1]['batches']==1
@@ -457,13 +460,14 @@ def test_policy_worker_attaches_and_verifies_hil_receipt():
     finally:w.close()
 
 
-def test_server_end_failure_is_retryable(tmp_path):
+def test_server_kept_end_failure_is_retryable(tmp_path):
     import json
     from HIL.server_recording import sync_decision
     from HIL.recording import atomic_json
     ep=Episode(tmp_path,{'fps':30})
     atomic_json(ep.path/'server_transaction.json',dict(episode_id=ep.episode_id,token='test',server='unused'))
-    path=ep.decide(False)
+    ep.metadata['outcome'] = 'failure'
+    path=ep.decide(True)
     class W:
         def control(self,payload): raise TimeoutError('lost end acknowledgement')
     with pytest.raises(TimeoutError): sync_decision(path,W())

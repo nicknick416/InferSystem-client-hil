@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from HIL_PI.recording import atomic_json, compact_records
+from HIL_PI.recording import atomic_json, compact_records, read_metadata
 
 UPLOAD_FIELDS = {'tick','mode','segment','state','human_action','policy_action','policy_raw_action',
                  'policy_source','pair_valid','publish_start','publish_time','observation_time',
@@ -12,7 +12,7 @@ UPLOAD_FIELDS = {'tick','mode','segment','state','human_action','policy_action',
 
 def sync_decision(path, worker):
     path=Path(path)
-    manifest=json.loads((path/'manifest.json').read_text())
+    manifest=read_metadata(path)
     if manifest['status'] not in ('kept','discarded'):
         raise ValueError('No explicit keep/discard decision; pending cannot be trained')
     txn=json.loads((path/'server_transaction.json').read_text())

@@ -143,7 +143,7 @@ inference:
 hil:
   expo_online: false
   expo_replan_steps: 8
-  output_dir: "hil_data"
+  output_dir: data
   horizon: 50
   vendor_id: 9583
   product_id: null

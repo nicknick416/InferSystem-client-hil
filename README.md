@@ -1,6 +1,8 @@
 # InferSystem HIL Client
 
-面向算法开发的机器人 Human-in-the-Loop 客户端：异步调用主策略，执行动作队列，检测运动停滞与触觉异常，并支持人工接管、历史回退和干预数据记录。本分支 `hil` 包含 VTLA 与 OpenPI 两套 HIL 入口，主策略和可选的腕部修正模型在外部服务运行。
+UR + Robotiq 支持 VTLA RTC 和非 RTC HIL。两份 VTLA 示例配置均启用 [静止帧过滤与 DAgger 数据采集](#ur-vtla-静止帧过滤与-dagger-数据采集)。设备适配和运行步骤见 [UR HIL](docs/ur_hil.md)。OpenPI 入口提供独立的 UR RTC 模板。
+
+面向算法开发的机器人 Human-in-the-Loop 客户端，支持异步推理、动作队列、运动停滞与触觉异常检测、人工接管、历史回退和干预数据记录。项目包含 VTLA 与 OpenPI 两套 HIL 入口，主策略和可选的腕部修正模型在外部服务运行。
 
 这是一套实验框架。检测输出是算法证据，不是机器人安全认证；离线测试通过不等于真实任务成功率已验证。
 
@@ -73,6 +75,8 @@ python robot_inference_pi_hil.py Config/local/pi_hil.yaml --live --prompt "Your 
 | `flexiv_vtla_keyboard_hil.yaml` | 两次按键的人工介入流程 |
 | `flexiv_pi_cylinder_rtc_hil.yaml` | OpenPI RTC HIL |
 | `flexiv_pi_cylinder_rtc_keyboard_hil.yaml` | OpenPI RTC + 键盘介入 |
+| `ur_vtla_rtc_hil.yaml`、`ur_vtla_nonrtc_hil.yaml` | UR VTLA + SpaceMouse，启用静止帧过滤和 DAgger 导出 |
+| `ur_pi_rtc_hil.yaml` | UR OpenPI RTC，使用独立 PI 服务 |
 
 发布示例将 `correction.enabled` 和 `correction.auto_execute` 设为 `false`。启用修正前先创建本地令牌文件，并配置服务地址；local-normal 触觉分支仍需要匹配的修正服务就绪信号。自动回退由独立的 `hil.stuck_recovery.enabled` 控制；启用检测不代表必须启用自动动作。
 
@@ -139,21 +143,65 @@ feedback 模式中，当前位置首先作为前一条命令的反馈；chunk �
 
 可选腕部修正服务在回退后建立 anchor；人工修正并恢复时生成监督样本。自动修正还需显式启用、服务就绪，并通过 anchor 漂移、目标范围等校验。无效目标被拒绝，人工接管优先。服务端实现见 [Wrist Correction](https://github.com/neoteai/wrist-correction)。
 
-## 给算法开发者的数据接口
+## UR VTLA 静止帧过滤与 DAgger 数据采集
 
-每轮先写入 `pending_*`，结束后确认保留或丢弃，转为 `kept_*` 或 `discarded_*`。
+### 启动和标记回合
 
-| 文件 | 内容与用途 |
+在项目根目录加载采集环境。UR VTLA 采集使用 `av`、`pyarrow`、`Pillow` 和支持 VAAPI H.265 编码的 FFmpeg。在新环境中先安装这些依赖，复制示例到 `Config/local/`，再填写现场设备和推理服务配置。
+
+```bash
+conda activate infer-client
+python -m pip install av pyarrow Pillow  # 仅在当前环境缺少这些依赖时执行
+mkdir -p Config/local
+# 新配置示例。已有本地配置时跳过复制。
+cp -n Config/ur_vtla_rtc_hil.yaml Config/local/ur_loading_rtc_hil.yaml
+# 填写本地 YAML 后，先检查配置，再确认现场设备和服务并开始采集。
+python robot_inference_hil.py Config/local/ur_loading_rtc_hil.yaml --check-only
+python robot_inference_hil.py Config/local/ur_loading_rtc_hil.yaml --live
+```
+
+非 RTC 采集使用 `Config/ur_vtla_nonrtc_hil.yaml` 创建对应的本地配置。移动 SpaceMouse 或按夹爪键接管，松手保持，按 `p` 将控制权交回策略。按 `r` 结束采集并回起始位姿，或按 `q` 停止采集并在确认结果后退出。结果确认时，`s` 保存成功回合，`f` 保存失败回合，`n` 丢弃，`q` 丢弃并退出。两个保存选项都触发训练导出。
+
+### 静止帧如何过滤
+
+UR VTLA RTC 和非 RTC 示例默认启用以下本地录制设置。
+
+```yaml
+hil:
+  omit_stationary_frames: true
+  export_dagger_training: true
+  recording:
+    format: collector_h265
+```
+
+录制线程在编码前过滤策略和人控的重复静止帧，实际控制和实时推理仍按原频率运行。每段静止保留首帧，恢复运动的首帧也会保存。过滤器同时检查固定参考下的实测末端位姿、关节、夹爪和下发目标。短暂停顿需要命令近乎不变且实测只有微小抖动，较宽容差要求持续稳定至少 0.30 秒。SpaceMouse 操作、夹爪变化、可辨的缓慢定向运动、目标尚未跟上和反馈过期都会保留对应帧，切换控制模式或接管段会重新判断。
+
+回合 `metadata.json` 中的 `source_tick_count` 和 `total_frames` 分别是过滤前控制帧数和实际保存帧数。`omitted_stationary_ranges` 记录省略的原始 tick 区间，`omitted_policy_idle_frames` 和 `omitted_human_idle_frames` 分别统计策略和人控的省略量。`tick` 保留原控制步编号，`frame_index` 连续并与保存的观测和视频对齐。需要保留完整控制帧时，将上述两个开关同时设为 `false`。
+
+### 训练数据怎么选
+
+每次启动在 `data/<采集会话>/` 下建立目录，保存的源回合和 `training/` 并列。训练目录包含两个独立的 LeRobot v2.1 数据视图。
+
+| 目录 | 训练数据 |
 |---|---|
-| `manifest.json` | episode 元数据、状态与汇总 |
-| `records.msgpack`、`blobs/` | 完整事件与去重的观测载荷 |
-| `control.msgpack` | 每个控制周期的紧凑记录，用于检测和执行分析 |
-| `pairs.msgpack` | 有效人工动作与时间对齐的影子策略候选 |
-| `execution_segments.msgpack` | 执行片段及逐步有效性标记 |
+| `training/full_episode/` | 完整执行轨迹，连续的策略动作、人控纠正和恢复策略保留在同一条轨迹上。 |
+| `training/human_only/` | 仅使用人控纠正。每次连续接管形成独立轨迹，中间交回策略时切段。没有接管的回合不会出现在这里。 |
 
-配对只使用实际人工控制且存在有效策略候选的周期；回退、保持和缺失候选不能当作人工偏好标签。使用 `pair_valid` 等有效性字段，不要把补齐或无效步当作监督。request ID、chunk index、generation 和观测/发布时刻用于追溯动作来源；原始预测、平滑候选、下发命令和实测反馈代表不同量。
+动作采用当时实际下发的 32 维指令。四路视频、状态和动作按帧对齐，训练时间从零按 30 Hz 排列，`source_tick` 可回溯原始控制时刻，`is_human` 标记动作来源。导出只连接经过静止过滤确认且时间连续的缺口，未经确认的缺帧或异常时间间隔会切段。每条训练轨迹的 `outcome` 保存在各视图的 `meta/episodes.jsonl`。
 
-`decide(False)` 会删除该轮记录和观测载荷，只保留丢弃元数据。独立提交的修正样本和正常触觉示例不随 episode 丢弃而撤销。记录格式和配对生成以 `HIL/recording.py` 及对应 OpenPI 实现为准；EXPO/DSRL 数据需使用各自模块的约定。
+导出失败时，已保存的回合可以补导。重复执行会跳过已经成功导出的回合。
+
+```bash
+python -m HIL.dagger_export "data/SESSION/EPISODE"
+```
+
+查看目录结构、夹爪 `action_mask`、触觉基准和回放细节见 [HIL 视频采集格式](docs/hil_video_storage.md)。
+
+## 执行记录与人工配对
+
+H.265 回合的 `metadata.json` 记录状态和结果，`hil/ticks.csv`、`hil/observations.jsonl` 和四路视频记录逐帧数据。旧版 MsgPack 录制使用 `manifest.json`、`control.msgpack`、`records.msgpack` 和 `blobs/`。两种格式可通过 `HIL.recording.records()` 或 `compact_records()` 读取。
+
+人工与影子策略的配对保存在 H.265 回合的 `hil/pairs.jsonl` 或旧格式的 `pairs.msgpack`。配对只使用实际人工控制且存在有效策略候选的周期，训练时按 `pair_valid` 过滤。request ID、chunk index、generation 和观测及发布时刻可追溯动作来源。独立提交的修正样本和正常触觉示例随各自流程保存。
 
 ## 算法验证建议
 
@@ -165,4 +213,4 @@ feedback 模式中，当前位置首先作为前一条命令的反馈；chunk �
 
 ## 当前验证状态
 
-发布隔离副本的离线测试为 **353 通过、13 失败**；13 项均可在原始源码复现，涉及 Aloha、旧 DSRL 协议测试及缺失的相机可视化模块。三个代表性 HIL 配置的 `--check-only` 通过，没有运行真实机器人。详细范围见 [发布验证](docs/VALIDATION.md)。
+历史离线验证和已知测试问题见 [发布验证](docs/VALIDATION.md)。

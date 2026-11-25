@@ -235,7 +235,9 @@ from HIL_PI.recording import records
 from HIL_PI.runtime import check_config
 
 @pytest.mark.parametrize('server_capture', [False])
-def test_rtc_mock_runtime_takeover_resume_reset(monkeypatch, tmp_path, server_capture):
+@pytest.mark.parametrize('decision', ['s', 'f', 'n', 'q'])
+@pytest.mark.parametrize('translation_mode', ['measured', 'integrated'])
+def test_rtc_mock_runtime_takeover_resume_reset(monkeypatch, tmp_path, server_capture, translation_mode, decision, episode_count=1):
     """Exercise the real runtime through injected devices, including r -> home -> y."""
     pytest.importorskip("cv2", reason="full mock runtime needs installed camera package, never opens cameras")
     import HIL_PI.runtime as rt
@@ -324,11 +326,12 @@ def test_rtc_mock_runtime_takeover_resume_reset(monkeypatch, tmp_path, server_ca
         def close(self): pass
     monkeypatch.setattr(rt, 'PolicyWorker', W)
     class K:
-        def __init__(self): self.answers=iter(['\n','\n','y','q']); self.i=0
+        def __init__(self): self.answers=iter(['\n'] + ['\n', decision] * episode_count + ['q']); self.i=0
         def __enter__(self): return self
         def __exit__(self, *args): pass
         def wait(self, choices, message):
             answer=next(self.answers)
+            if answer == '\n': self.i = 0
             events.append(('answer',answer))
             return answer
         def read(self):
@@ -352,13 +355,51 @@ def test_rtc_mock_runtime_takeover_resume_reset(monkeypatch, tmp_path, server_ca
     raw['inference']['rtc'] = dict(enabled=True, prefix_length=4)
     raw['hil']['output_dir']=str(tmp_path)
     raw['hil']['server_capture']=server_capture
+    raw['hil']['translation_mode'] = translation_mode
+    if translation_mode == 'integrated':
+        raw['hil']['linear_speed_m_s'] = .21
+        raw['hil']['max_translation_lead_m'] = .04
     rt.run_live(path,cfg,raw,'test')
-    kept=list(tmp_path.glob('kept_*'))
-    assert len(kept)==1
+    kept=list(tmp_path.glob('[0-9]*/[0-9]*_episode_*'))
+    if decision in ('n', 'q'):
+        assert not kept
+        assert not list(tmp_path.rglob('records.msgpack'))
+        assert not list(tmp_path.rglob('manifest.json'))
+        return
+    assert len(kept)==episode_count
+    if episode_count > 1:
+        import json
+        saved = [json.loads((path/'manifest.json').read_text()) for path in sorted(kept)]
+        assert [m['episode_index'] for m in saved] == list(range(1, episode_count+1))
+        assert all(m['outcome'] == 'success' for m in saved)
+        assert len({path.parent for path in kept}) == 1
+        if server_capture:
+            assert events.count('hil_decide') == episode_count
+        return
     rows=list(records(kept[0]))
     human=[r for r in rows if r['kind']=='tick' and r['mode']=='human']
     assert len(human) == 7
-    assert all(r['human_action'][0] == pytest.approx(.401) for r in human)
+    expected_x = ([.4 + .0035 * (i+1) for i in range(7)]
+                  if translation_mode == 'integrated' else [.401] * 7)
+    assert [r['human_requested_action'][0] for r in human] == pytest.approx(expected_x)
+    assert all(r['human_action'] == r['published_action'] for r in human)
+    with (kept[0]/'pairs.msgpack').open('rb') as f:
+        pairs = list(msgpack.Unpacker(f, raw=False))
+    valid = {r['tick']: r for r in human if r['pair_valid']}
+    assert {p['tick'] for p in pairs} == set(valid)
+    for pair in pairs:
+        row = valid[pair['tick']]
+        assert pair['human_action'] == row['published_action']
+        assert pair['policy_action'] == row['policy_action']
+        assert pair['policy_source'] == row['policy_source']
+        assert pair['policy_executed'] is False
+    import json
+    manifest = json.loads((kept[0]/'manifest.json').read_text())
+    assert manifest['config']['hil']['translation_mode'] == translation_mode
+    assert manifest['outcome'] == ('success' if decision == 's' else 'failure')
+    assert manifest['episode_index'] == 1
+    assert manifest['human_ticks'] == len(human)
+    assert manifest['paired_steps'] == len(pairs)
     assert requests[0][0]['rtc']['prefix_length'] == 0
     assert all(len(req['state']) == 10 for req, _ in requests)
     assert requests[0][0]['state'][9] == pytest.approx(.5)
@@ -378,11 +419,11 @@ def test_rtc_mock_runtime_takeover_resume_reset(monkeypatch, tmp_path, server_ca
     assert first['policy_source']['chunk_index'] == 0
     home_indices=[i for i,e in enumerate(events) if e=='home']
     assert len(home_indices)==2
-    assert home_indices[-1]<events.index('drain')<events.index(('answer','y'))
+    assert home_indices[-1]<events.index('drain')<events.index(('answer',decision))
     assert ('home_velocity', raw['hil'].get('home_velocity_scale', .30)) in events
     if server_capture:
         assert events.index('server_end') > home_indices[-1]
-        assert events.index('hil_upload') > events.index(('answer','y'))
+        assert events.index('hil_upload') > events.index(('answer',decision))
         assert events.index('hil_decide') > events.index('hil_upload')
     end=[r for r in rows if r['kind']=='episode_end']
     assert len(end)==1 and end[0]['reason']=='r' and end[0]['homing_recorded'] is False
@@ -419,3 +460,9 @@ def test_fresh_rtc_hold_does_not_skip_and_blends_over_configured_steps():
     assert arb.policy_steps == 1
     assert not arb.accept({'actions':[target]*50}, generation, 30)
     assert arb.awaiting_first_policy
+
+
+def test_two_episodes_share_capture_directory_with_server_capture(monkeypatch, tmp_path):
+    test_rtc_mock_runtime_takeover_resume_reset(
+        monkeypatch, tmp_path, server_capture=True, translation_mode='measured',
+        decision='s', episode_count=2)

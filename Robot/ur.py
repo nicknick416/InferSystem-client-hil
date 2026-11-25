@@ -42,35 +42,22 @@ class URRobotiqGripper(BaseGripper):
         self._close_raw = int(self._config.get("close_raw", 255))
         # For compatibility with policy outputs that use 0=open,1=close while
         # upper layers may call set(True)=open by contract.
-        self._invert_set_open_close = bool(self._config.get("invert_set_open_close", True))
+        self._invert_set_open_close = bool(self._config.get("invert_set_open_close", False))
         self._last_raw: int | None = None
 
     def connect(self) -> None:
         if self._connected:
             return
-        try:
-            from robotiq_gripper import RobotiqGripper  # type: ignore
-        except Exception:
-            try:
-                from ur_collector.robotiq_gripper import RobotiqGripper  # type: ignore
-            except Exception:
-                try:
-                    from SDK.ur.robotiq_gripper import RobotiqGripper  # type: ignore
-                except Exception as e:
-                    raise ModuleNotFoundError(
-                        "Cannot import RobotiqGripper. Install `robotiq_gripper`, or provide `ur_collector` / `SDK.ur` on PYTHONPATH."
-                    ) from e
+        from Robot.robotiq_gripper import RobotiqGripper
 
         self._gripper = RobotiqGripper()
         self._gripper.connect(self._robot_ip, port=self._port)
-
-        # 兼容不同版本 activate() 签名
-        try:
-            self._gripper.activate(
-                calibration_cache_path="/tmp/robotiq_gripper_calibration.json"
-            )
-        except TypeError:
-            self._gripper.activate()
+        self._gripper.activate(
+            auto_calibrate=bool(self._config.get(
+                "auto_calibrate_on_connect", self._config.get("auto_calibrate", False)
+            )),
+            calibration_cache_path=self._config.get("calibration_cache_path"),
+        )
 
         self._connected = True
         try:
@@ -583,7 +570,9 @@ class URRobot(BaseRobot):
         gain = float(self._control_config.get("servoj_gain", 300.0))
 
         if _has_callable(self._rtde_c, "servoL"):
-            self._rtde_c.servoL(pose_rv, 0.0, 0.0, dt, lookahead, gain)
+            result = self._rtde_c.servoL(pose_rv, 0.0, 0.0, dt, lookahead, gain)
+            if result is False:
+                raise RuntimeError("UR servoL rejected Cartesian target")
             return
 
         # fallback: moveL 非实时，但保持接口可用
@@ -595,45 +584,75 @@ class URRobot(BaseRobot):
 
         raise NotImplementedError("当前 ur_rtde 版本不支持笛卡尔控制")
 
-    def go_home(self, *, velocity: float | None = None, timeout_s: float = 60.0) -> bool:
-        """UR 专用回 Home: moveJ + reconnect/reupload + 重试。"""
-        del timeout_s  # moveJ 自身阻塞，不再单独使用 timeout
-
+    def move_joint_position(
+        self, positions, *, velocity=None, tolerance=0.01, timeout_s=60.0,
+    ) -> bool:
+        """Planned UR moveJ, restoring the RTDE script after HIL stop/reset."""
         self._require_connected()
-        home = self.get_params().home_position
-        self._validate_length("home_position", home)
+        target = [float(v) for v in positions]
+        self._validate_length("positions", target)
+        self._validate_joint_positions(target)
+        speed = float(self._control_config.get("home_speed", 0.3) if velocity is None else velocity)
+        acceleration = float(self._control_config.get("home_acceleration", 0.3))
+        if not all(math.isfinite(v) for v in target + [speed, acceleration, tolerance, timeout_s]):
+            raise ValueError("UR home parameters must be finite")
+        if min(speed, acceleration, tolerance, timeout_s) <= 0:
+            raise ValueError("UR home speed, acceleration, tolerance and timeout must be positive")
+        if self.is_fault():
+            logger.error("UR Home refused: protective/emergency stop is active")
+            return False
+        if not self._rtde_c.isConnected() and self._rtde_c.reconnect() is False:
+            logger.error("UR Home failed: RTDE reconnect was rejected")
+            return False
+        if self._rtde_c.reuploadScript() is False:
+            logger.error("UR Home failed: RTDE control script upload was rejected")
+            return False
+        # ur_rtde 1.6.3 acknowledges the upload before the controller starts it.
+        # moveJ sent in that interval is rejected, even though upload succeeded.
+        script_deadline = time.monotonic() + min(5.0, timeout_s)
+        while True:
+            if self.is_fault() or not self._rtde_c.isConnected():
+                logger.error("UR Home aborted while starting RTDE script: robot fault or connection lost")
+                return False
+            if self._rtde_c.isProgramRunning():
+                break
+            if time.monotonic() >= script_deadline:
+                logger.error("UR Home failed: RTDE control script did not start; check the teach pendant and remote-control state")
+                return False
+            time.sleep(0.01)
+        logger.info("UR Home: RTDE control script ready; sending moveJ")
+        self._last_cmd_q = None
+        self._last_vel_send_time = None
+        if self._rtde_c.moveJ(target, speed, acceleration, True) is False:
+            logger.error("UR Home failed: moveJ was rejected")
+            return False
+        deadline = time.monotonic() + timeout_s
+        try:
+            while time.monotonic() < deadline:
+                if not self._rtde_c.isConnected() or not self._rtde_c.isProgramRunning():
+                    logger.error("UR Home failed: RTDE connection lost or control script stopped during moveJ; no automatic retry")
+                    return False
+                if self.is_fault():
+                    logger.error("UR Home aborted: protective/emergency stop became active")
+                    return False
+                actual = list(self._rtde_r.getActualQ())
+                if (len(actual) == len(target)
+                        and all(abs(a-b) < tolerance for a, b in zip(actual, target))
+                        and self._rtde_c.isSteady()):
+                    logger.info("UR Home completed: joints reached target and robot is steady")
+                    return True
+                time.sleep(0.01)
+        except BaseException:
+            self._rtde_c.stopJ(acceleration)
+            raise
+        self._rtde_c.stopJ(acceleration)
+        logger.error("UR Home timed out after %.1f seconds without confirmed arrival", timeout_s)
+        return False
 
-        speed = float(self._control_config.get("home_speed", 0.5))
-        acceleration = float(self._control_config.get("home_acceleration", 0.5))
-        if velocity is not None:
-            speed = float(velocity)
-
-        moved_home = False
-        for attempt in (1, 2):
-            try:
-                if not bool(_safe_call(self._rtde_c, "isConnected", default=True)):
-                    _safe_call(self._rtde_c, "reconnect", default=None)
-                    time.sleep(0.1)
-
-                _safe_call(self._rtde_c, "reuploadScript", default=None)
-                time.sleep(0.2)
-
-                if _has_callable(self._rtde_c, "moveJ"):
-                    self._rtde_c.moveJ(list(home), speed=speed, acceleration=acceleration)
-                    moved_home = True
-                    break
-
-                # 兜底: 没有 moveJ 时退回基类实现
-                return super().go_home(velocity=velocity, timeout_s=60.0)
-
-            except Exception as e:
-                logger.warning("Home attempt %d failed: %s", attempt, e)
-                time.sleep(0.2)
-
-        if not moved_home:
-            logger.warning("Return home failed after retries.")
-
-        return moved_home
+    def go_home(self, *, velocity: float | None = None, timeout_s: float = 60.0) -> bool:
+        return self.move_joint_position(
+            self.get_params().home_position, velocity=velocity, timeout_s=timeout_s,
+        )
 
     def _send_servoj(self, target_q: list[float], *, state: ArmState | None = None) -> None:
         self._validate_length("target_q", target_q)

@@ -14,11 +14,12 @@ class _RobotSink:
 
 
 class _GripperSink:
-    def __init__(self, max_width):
+    def __init__(self, max_width, width):
         self.max_width = max_width
+        self.width = width
 
     def observe(self):
-        return SimpleNamespace(max_width=self.max_width)
+        return SimpleNamespace(max_width=self.max_width, width=self.width)
 
     def move(self, width, wait=False):
         self.width = width
@@ -27,7 +28,7 @@ class _GripperSink:
 def command32(dispatcher, requested, scale):
     pose = dispatcher.last_robot_action_values
     if pose is None or len(pose) != 7:
-        raise RuntimeError('Expected a single Flexiv published pose7')
+        raise RuntimeError('Expected a single published pose7')
     width = dispatcher._last_gripper_width_cmd
     if width is None:
         raise RuntimeError('Missing dispatcher gripper command')
@@ -48,7 +49,10 @@ def preview_candidate(dispatcher, requested, arm, config, gripper_max, scale):
                     rejection=f'safety: {pos:.6f} m / {rot:.6f} rad')
     preview = copy(dispatcher)
     preview._robot = _RobotSink()
-    preview._gripper = _GripperSink(gripper_max)
+    width = dispatcher._last_gripper_width_cmd
+    if width is None and dispatcher._max_eef_gripper_step > 0:
+        width = dispatcher._gripper.observe().width
+    preview._gripper = _GripperSink(gripper_max, width or 0.)
     preview._gripper_max_width = gripper_max
     preview.dispatch(action, state=arm)
     return dict(valid=True, action=command32(preview, requested, scale),

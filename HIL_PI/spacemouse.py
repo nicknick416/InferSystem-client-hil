@@ -118,14 +118,29 @@ def human_action(state, axes, buttons, dt, *, linear_speed=.06, angular_speed=.2
 
 
 class HumanController:
-    """Measured-relative motion while active; fixed targets while released.
+    """Configurable translation while active; fixed targets while released.
 
     Translation and rotation latch independently, so gripper-only input never
     follows TCP feedback noise. Gripper target integrates commands, not lagging
     feedback, and therefore can cross dispatcher hysteresis/mechanical deadband.
+    Integrated translation follows the collector's command increments, with a
+    finite lead bound to prevent unreachable targets from accumulating.
     """
-    def __init__(self):
+    def __init__(self, *, translation_mode='measured', max_translation_lead_m=.04):
+        if translation_mode not in ('measured', 'integrated'):
+            raise ValueError('hil.translation_mode must be measured or integrated')
+        if (isinstance(max_translation_lead_m, bool)
+                or not np.isfinite(max_translation_lead_m)
+                or max_translation_lead_m <= 0):
+            raise ValueError('hil.max_translation_lead_m must be finite and positive')
+        self.translation_mode = translation_mode
+        self.max_translation_lead_m = float(max_translation_lead_m)
         self.reset()
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(translation_mode=config.get('translation_mode', 'measured'),
+                   max_translation_lead_m=config.get('max_translation_lead_m', .04))
 
     def reset(self):
         self.target = None
@@ -147,7 +162,18 @@ class HumanController:
                                 angular_speed=angular_speed, gripper_max=gripper_max,
                                 gripper_scale=1.)
         if position_active:
-            self.target[:3] = proposed[:3]
+            if self.translation_mode == 'integrated':
+                # Anchor each new gesture to feedback, never to an old hold pose.
+                if not self.position_active:
+                    self.target[:3] = state[:3]
+                self.target[:3] += np.asarray(axes[:3]) * linear_speed * dt
+                lead = self.target[:3] - np.asarray(state[:3])
+                distance = float(np.linalg.norm(lead))
+                if distance > self.max_translation_lead_m:
+                    self.target[:3] = (np.asarray(state[:3])
+                                      + lead * (self.max_translation_lead_m / distance))
+            else:
+                self.target[:3] = proposed[:3]
         if rotation_active:
             self.target[3:9] = proposed[3:9]
         direction = -1 if buttons == 1 else 1 if buttons == 2 else 0

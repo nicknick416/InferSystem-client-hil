@@ -38,6 +38,7 @@ class ActionSpaceEnum(str, Enum):
 class GripperModeEnum(str, Enum):
     binary = "binary"
     width = "width"
+    normalized_width = "normalized_width"
     raw = "raw"
 
 
@@ -283,7 +284,8 @@ class URGripperConfig(BaseModel):
     max_force: float = 100.0
     open_raw: int = 0
     close_raw: int = 255
-    invert_set_open_close: bool = True
+    invert_set_open_close: bool = False
+    auto_calibrate_on_connect: bool = False
 
     model_config = {"extra": "allow"}
 
